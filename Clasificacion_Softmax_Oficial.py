@@ -1,13 +1,10 @@
-#!/usr/bin/env python
-# coding: utf-8
-
 # 1. LIBRERÍAS
+import os
 import pandas as pd
 import numpy as np
 import tensorflow as tf
 import matplotlib.pyplot as plt
 import seaborn as sns
-import os
 
 from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.model_selection import train_test_split
@@ -26,31 +23,26 @@ X_raw = df.drop('clase_usuario', axis=1)
 y_raw = df['clase_usuario']
 
 clases = np.sort(y_raw.unique())
-clase_to_num = {c:i for i,c in enumerate(clases)}
-num_to_clase = {i:c for c,i in clase_to_num.items()}
+clase_to_num = {c: i for i, c in enumerate(clases)}
+num_to_clase = {i: c for c, i in clase_to_num.items()}
 y_num = y_raw.map(clase_to_num)
 y_cat = np.eye(len(clases))[y_num]
 
-# Columnas numéricas y categóricas
 num_feats = ['frecuencia_visitas', 'recencia', 'interacciones']
-cat_feats = ['ubicacion', 'categoria_productos','tipo_dispositivo']
+cat_feats = ['ubicacion', 'categoria_productos', 'tipo_dispositivo']
 
-# ColumnTransformer
 preprocessor = ColumnTransformer([
     ('num', StandardScaler(), num_feats),
     ('cat', OneHotEncoder(sparse_output=False, handle_unknown='ignore'), cat_feats)
 ])
 
-# Separar entrenamiento y validación antes del escalado
 X_train_raw, X_val_raw, y_train_cat, y_val_cat, y_train_num, y_val_num = train_test_split(
     X_raw, y_cat, y_num, test_size=0.2, stratify=y_num, random_state=42
 )
 
-# Ajustar preprocesador con datos de entrenamiento solamente
 X_train = preprocessor.fit_transform(X_train_raw)
 X_val = preprocessor.transform(X_val_raw)
 
-# Conversión a tensores
 X_train = tf.constant(X_train, dtype=tf.float32)
 y_train = tf.constant(y_train_cat, dtype=tf.float32)
 X_val = tf.constant(X_val, dtype=tf.float32)
@@ -59,10 +51,16 @@ y_val = tf.constant(y_val_cat, dtype=tf.float32)
 # 4. INICIALIZACIÓN DE PARÁMETROS
 num_features = X_train.shape[1]
 num_classes = y_train.shape[1]
-tf.random.set_seed(42)  # Semilla reproducible
+tf.random.set_seed(42)
 
-W = tf.Variable(tf.random.normal(shape=(num_features, num_classes), stddev=0.01), name='weights')
-b = tf.Variable(tf.zeros(shape=(num_classes,)), name='bias')
+if os.path.exists('W_pesos.npy') and os.path.exists('b_bias.npy'):
+    print("📦 Cargando pesos W y bias b desde archivos existentes.")
+    W = tf.Variable(np.load('W_pesos.npy'), name='weights', dtype=tf.float32)
+    b = tf.Variable(np.load('b_bias.npy'), name='bias', dtype=tf.float32)
+else:
+    print("🆕 Inicializando pesos y bias aleatoriamente.")
+    W = tf.Variable(tf.random.normal(shape=(num_features, num_classes), stddev=0.01), name='weights')
+    b = tf.Variable(tf.zeros(shape=(num_classes,)), name='bias')
 
 # 5. MODELO LINEAL + SOFTMAX
 def model(X):
@@ -89,9 +87,11 @@ patience = 10
 best_val_loss = np.inf
 wait = 0
 
+train_loss_history = []
+val_loss_history = []
+
 dataset = tf.data.Dataset.from_tensor_slices((X_train, y_train)).shuffle(buffer_size=1024).batch(batch_size)
 
-# Guardado de los mejores pesos
 best_W, best_b = None, None
 
 for epoch in range(1, epochs + 1):
@@ -114,9 +114,11 @@ for epoch in range(1, epochs + 1):
     val_loss = cross_entropy(y_val, val_preds).numpy()
     val_acc = accuracy(y_val, val_preds).numpy()
 
+    train_loss_history.append(epoch_loss)
+    val_loss_history.append(val_loss)
+
     print(f"Epoch {epoch:03d} | Train Loss: {epoch_loss:.4f} Acc: {epoch_acc:.4f} | Val Loss: {val_loss:.4f} Acc: {val_acc:.4f}")
 
-    # Early Stopping
     if val_loss < best_val_loss:
         best_val_loss = val_loss
         best_W = W.numpy()
@@ -128,9 +130,12 @@ for epoch in range(1, epochs + 1):
             print("📌 Entrenamiento detenido por early stopping.")
             break
 
-# Restaurar los mejores pesos
 W.assign(best_W)
 b.assign(best_b)
+
+np.save('W_pesos.npy', best_W)
+np.save('b_bias.npy', best_b)
+print("✅ Pesos y bias guardados para futuras ejecuciones.")
 
 # 9. PREDICCIÓN SOBRE NUEVOS USUARIOS
 df_new = pd.read_csv('usuarios_nuevos.csv')
@@ -144,17 +149,63 @@ df_new['clase_predicha'] = [num_to_clase[n] for n in pred_num]
 print("\n📊 Clasificación de nuevos usuarios:")
 print(df_new)
 
-# 10. GRÁFICA EN GRADIENTE (Heatmap)
-plt.figure(figsize=(12, min(1 + 0.5 * len(df_new), 12)))  # Ajusta alto según cantidad de usuarios
-
-# Crear DataFrame para el heatmap
+# 10. GRÁFICA DE HEATMAP (CLASIFICACIÓN)
+plt.figure(figsize=(12, min(1 + 0.5 * len(df_new), 12)))
 heatmap_df = pd.DataFrame(pred_prob, columns=clases)
 heatmap_df.index = [f"Usuario {i+1}" for i in range(len(df_new))]
-
-# Graficar el mapa de calor
 sns.heatmap(heatmap_df, annot=True, cmap='viridis', fmt=".2f", cbar_kws={"label": "Probabilidad"})
 plt.title("Probabilidades de clasificación por clase (Softmax)")
 plt.xlabel("Clase")
 plt.ylabel("Nuevos usuarios")
+plt.tight_layout()
+plt.show()
+
+# 11. GRÁFICO DE PÉRDIDA (Entropía cruzada)
+plt.figure(figsize=(10, 5))
+plt.plot(train_loss_history, label='train', color='blue')
+plt.plot(val_loss_history, label='test', color='orange')
+plt.title('model loss')
+plt.xlabel('epoch')
+plt.ylabel('loss')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# 12. GRÁFICO DE DESCENSO DE GRADIENTE
+def loss_fn(x, y):
+    return x**2 + y**2
+
+def grad_fn(x, y):
+    return np.array([2*x, 2*y])
+
+x, y = 1.5, 1.5
+learning_rate = 0.1
+steps = 20
+trajectory = [(x, y)]
+
+for i in range(steps):
+    grad = grad_fn(x, y)
+    x -= learning_rate * grad[0]
+    y -= learning_rate * grad[1]
+    trajectory.append((x, y))
+
+trajectory = np.array(trajectory)
+
+x_vals = np.linspace(-2, 2, 100)
+y_vals = np.linspace(-2, 2, 100)
+Xg, Yg = np.meshgrid(x_vals, y_vals)
+Z = loss_fn(Xg, Yg)
+
+plt.figure(figsize=(8, 6))
+contours = plt.contour(Xg, Yg, Z, levels=20, cmap='viridis')
+plt.clabel(contours, inline=True, fontsize=8)
+plt.plot(trajectory[:, 0], trajectory[:, 1], 'ro--', label='Descenso de Gradiente')
+plt.scatter(0, 0, color='green', s=100, label='Mínimo Global')
+plt.title('Visualización del Descenso de Gradiente')
+plt.xlabel('x (Peso W)')
+plt.ylabel('y (Bias b)')
+plt.legend()
+plt.grid(True)
 plt.tight_layout()
 plt.show()
